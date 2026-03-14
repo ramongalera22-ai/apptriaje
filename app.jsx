@@ -728,13 +728,16 @@ function App() {
 
   const startVoice=()=>{setScr("voice");setVP("idle");setTx("");setItm("");setConvLog([]);setVA(null);setVFu([]);setVFi(0);setVFa([]);};
 
+  const txRef=useRef("");
+
   const startRec=()=>{
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
     if(!SR){alert(t.browserNoVoice);return;}
     const r=new SR();r.lang=vLang;r.continuous=true;r.interimResults=true;
-    let ft="";
-    r.onresult=e=>{let fin="",int="";for(let i=e.resultIndex;i<e.results.length;i++){if(e.results[i].isFinal)fin+=e.results[i][0].transcript+" ";else int=e.results[i][0].transcript;}if(fin){ft+=fin;setTx(ft);}setItm(int);};
-    r.onerror=()=>setVP("idle");r.onend=()=>{};
+    txRef.current="";
+    r.onresult=e=>{let fin="",int="";for(let i=e.resultIndex;i<e.results.length;i++){if(e.results[i].isFinal)fin+=e.results[i][0].transcript+" ";else int=e.results[i][0].transcript;}if(fin){txRef.current+=fin;setTx(txRef.current);}setItm(int);};
+    r.onerror=()=>{setVP("idle");clearInterval(animRef.current);};
+    r.onend=()=>{};
     recRef.current=r;r.start();setVP("recording");
     animRef.current=setInterval(()=>setPulse(p=>(p+1)%100),60);
   };
@@ -742,9 +745,13 @@ function App() {
   const stopRec=()=>{
     if(recRef.current)try{recRef.current.stop();}catch(e){}
     clearInterval(animRef.current);
-    if(!tx.trim()){setVP("idle");return;}
-    setConvLog([{role:"patient",text:tx.trim(),lang:vLang}]);
-    setVP("analyzing");callGemini(tx.trim());
+    const finalText=txRef.current.trim();
+    if(!finalText){setVP("idle");return;}
+    setTx(finalText);
+    setConvLog([{role:"patient",text:finalText,lang:vLang}]);
+    setVP("analyzing");
+    // Small delay to ensure state updates before calling API
+    setTimeout(()=>callGemini(finalText),100);
   };
 
   const TPROMPT=(text,prevContext)=>`You are a medical triage system from the Servicio Murciano de Salud (SMS) based on the Sistema Espanol de Triaje (SET) with 5 priority levels, following the NHS Pathways conservative principle.
@@ -764,36 +771,54 @@ Respond ONLY with valid JSON, no markdown, no backticks:
 
   const callGemini=async(text,prevContext)=>{
     const prompt=TPROMPT(text,prevContext);
+    // Try Gemini
     if(gemK){
       try{
+        const ctrl=new AbortController();
+        const tmout=setTimeout(()=>ctrl.abort(),10000);
         const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${gemK}`,{
-          method:"POST",headers:{"Content-Type":"application/json"},
+          method:"POST",headers:{"Content-Type":"application/json"},signal:ctrl.signal,
           body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:0.2,maxOutputTokens:1024,responseMimeType:"application/json"}})
         });
+        clearTimeout(tmout);
         const d=await r.json();const raw=d?.candidates?.[0]?.content?.parts?.[0]?.text||"";
-        const parsed=JSON.parse(raw.replace(/```json|```/g,"").trim());
-        return handleAI(parsed);
+        if(raw){const parsed=JSON.parse(raw.replace(/```json|```/g,"").trim());handleAI(parsed);return;}
       }catch(e){console.warn("Gemini fail:",e);}
     }
+    // Try Anthropic (inside Claude artifacts only)
     try{
-      const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},
+      const ctrl2=new AbortController();
+      const tmout2=setTimeout(()=>ctrl2.abort(),8000);
+      const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},signal:ctrl2.signal,
         body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,messages:[{role:"user",content:prompt}]})});
+      clearTimeout(tmout2);
       const d=await r.json();const txt=d.content?.map(b=>b.text||"").join("")||"";
-      return handleAI(JSON.parse(txt.replace(/```json|```/g,"").trim()));
+      if(txt){handleAI(JSON.parse(txt.replace(/```json|```/g,"").trim()));return;}
     }catch(e){console.warn("Anthropic fail:",e);}
+    // Always fall back to local — guaranteed to work
     handleAI(localFallback(text));
   };
 
   const localFallback=(text)=>{
-    const lo=text.toLowerCase();let lv=4;
-    if(["no responde","inconsciente","no respira","convulsion","unconscious","not breathing"].some(a=>lo.includes(a)))lv=1;
-    else if(["pecho","infarto","sangre mucha","desmayo","chest pain","heart attack","cannot breathe"].some(a=>lo.includes(a)))lv=2;
-    else if(lo.match(/fiebre alta|39|vomit|no para|high fever/))lv=3;
-    else if(lo.match(/dolor|fiebre|tos|molest|pain|fever|cough/))lv=4;else lv=5;
-    return{idioma:"auto",codigo_idioma:vLang,traduccion_es:text,nivel_set:lv,categoria:"General",sintomas:[text.slice(0,60)],discriminadores:[],dolor_eva:lv<=2?8:3,resumen_clinico:text.slice(0,150),preguntas:lv>2?["Tiene fiebre?","Desde cuando tiene estos sintomas?"]:[],destino:lv<=2?"urgencias":"centro_salud",especialidad:"Medicina de Familia",triaje_completo:lv<=2};
+    const lo=text.toLowerCase();let lv=4;let cat="Evaluacion general";let spec="Medicina de Familia";let dest="centro_salud";
+    // Alarm keywords — level 1-2
+    if(["no responde","inconsciente","no respira","convulsion","unconscious","not breathing","ne respire pas","لا يستجيب"].some(a=>lo.includes(a))){lv=1;cat="Compromiso vital";spec="Urgencias";dest="urgencias";}
+    else if(["pecho","infarto","sangre mucha","desmayo","chest pain","heart attack","cannot breathe","douleur poitrine","ألم في الصدر","no puedo respirar"].some(a=>lo.includes(a))){lv=2;cat="Dolor toracico / Disnea";spec="Cardiologia / Urgencias";dest="urgencias";}
+    else if(lo.match(/fiebre alta|39|40|vomit|no para|high fever|forte fievre|حمى شديدة/)){lv=3;cat="Fiebre / Vomitos";spec="Medicina de Familia";dest="suap";}
+    else if(lo.match(/dolor|fiebre|tos|molest|pain|fever|cough|douleur|toux|fievre|ألم|حمى|سعال/)){lv=4;cat="Sintomatologia general";spec="Medicina de Familia";dest="centro_salud";}
+    else{lv=5;dest="farmacia";}
+    return{
+      idioma:"auto-detectado",codigo_idioma:vLang,
+      traduccion_es:text,nivel_set:lv,categoria:cat,
+      sintomas:[text.slice(0,80)],discriminadores:[],
+      dolor_eva:lv<=2?8:lv===3?5:3,
+      resumen_clinico:`Paciente refiere: ${text.slice(0,200)}. Clasificacion automatica nivel ${lv} SET. Derivar a ${dest}.`,
+      preguntas:[],destino:dest,especialidad:spec,triaje_completo:true
+    };
   };
 
   const handleAI=(p)=>{
+    if(!p||typeof p!=="object"){handleAI(localFallback(tx.trim()));return;}
     setVA(p);
     // Add translation to conversation log
     if(p.traduccion_es){
@@ -805,14 +830,13 @@ Respond ONLY with valid JSON, no markdown, no backticks:
         return updated;
       });
     }
-    // If triage is complete or no follow-up questions, finish
-    if(p.triaje_completo||!p.preguntas||p.preguntas.length===0){
+    // ALWAYS finish if triaje_completo, no preguntas, or preguntas empty
+    if(p.triaje_completo||!p.preguntas||p.preguntas.length===0||!Array.isArray(p.preguntas)){
       finishVoice(p,[]);
     }else{
       setVFu(p.preguntas.slice(0,2));
       setVFi(0);setVFa([]);
       setVP("followup");
-      // Read first question aloud
       const qLang=p.codigo_idioma||vLang;
       setTimeout(()=>startFollowupVoice(p.preguntas[0],qLang,0),500);
     }
@@ -891,10 +915,11 @@ Respond ONLY with valid JSON:
 
   const finishVoice=(a,fua)=>{
     window.speechSynthesis?.cancel();
+    const patientText=txRef.current.trim()||tx.trim()||"(voz)";
     const allAns=[
-      {q:t.patientNarrative,a:tx.trim()},
-      ...(a.traduccion_es&&a.idioma&&a.idioma!=="es"&&a.idioma!=="espanol"&&a.idioma!=="auto"?[{q:t.translationLabel+" ("+a.idioma+")",a:a.traduccion_es}]:[]),
-      {q:t.detectedSymptomsLabel,a:(a.sintomas||[]).join(", ")},
+      {q:t.patientNarrative,a:patientText},
+      ...(a.traduccion_es&&a.idioma&&a.idioma!=="es"&&a.idioma!=="espanol"&&a.idioma!=="auto"&&a.idioma!=="auto-detectado"?[{q:t.translationLabel+" ("+a.idioma+")",a:a.traduccion_es}]:[]),
+      {q:t.detectedSymptomsLabel,a:(a.sintomas||[]).join(", ")||patientText.slice(0,60)},
       ...(a.resumen_clinico?[{q:t.clinicalSummary,a:a.resumen_clinico}]:[]),
       ...(a.discriminadores&&a.discriminadores.length>0?[{q:"Discriminadores SET",a:a.discriminadores.join(", ")}]:[]),
       ...(a.categoria?[{q:t.consultReason+" (SET)",a:a.categoria}]:[]),
