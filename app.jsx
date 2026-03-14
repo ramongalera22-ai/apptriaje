@@ -750,8 +750,47 @@ function App() {
     setTx(finalText);
     setConvLog([{role:"patient",text:finalText,lang:vLang}]);
     setVP("analyzing");
-    // Small delay to ensure state updates before calling API
-    setTimeout(()=>callGemini(finalText),100);
+    // HARD SAFETY: if still analyzing after 8s, force local result
+    const safetyTimer=setTimeout(()=>{
+      console.warn("Safety timeout — forcing local result");
+      const fb=localFallback(finalText);
+      setVA(fb);
+      finishVoiceDirect(fb,[],finalText);
+    },8000);
+    // Try APIs
+    callGemini(finalText).then(()=>{
+      clearTimeout(safetyTimer);
+    }).catch(()=>{
+      clearTimeout(safetyTimer);
+      const fb=localFallback(finalText);
+      setVA(fb);
+      finishVoiceDirect(fb,[],finalText);
+    });
+  };
+
+  // Direct finish that doesn't depend on state
+  const finishVoiceDirect=(a,fua,patientText)=>{
+    window.speechSynthesis?.cancel();
+    const txt=patientText||txRef.current.trim()||tx||"(voz)";
+    const allAns=[
+      {q:t.patientNarrative,a:txt},
+      ...(a.traduccion_es&&a.idioma&&a.idioma!=="es"&&a.idioma!=="espanol"&&a.idioma!=="auto"&&a.idioma!=="auto-detectado"?[{q:t.translationLabel+" ("+a.idioma+")",a:a.traduccion_es}]:[]),
+      {q:t.detectedSymptomsLabel,a:(a.sintomas||[]).join(", ")||txt.slice(0,60)},
+      ...(a.resumen_clinico?[{q:t.clinicalSummary,a:a.resumen_clinico}]:[]),
+      ...(a.discriminadores&&a.discriminadores.length>0?[{q:"Discriminadores SET",a:a.discriminadores.join(", ")}]:[]),
+      ...(a.categoria?[{q:t.consultReason+" (SET)",a:a.categoria}]:[]),
+      ...(a.especialidad?[{q:"Especialidad",a:a.especialidad}]:[]),
+      ...(a.dolor_eva>0?[{q:t.painEVA,a:`${a.dolor_eva}/10`}]:[]),
+      ...(a.destino?[{q:"Destino",a:a.destino}]:[]),
+      ...fua.map((a2,i)=>({q:vFu[i]||`${t.followupQ} ${i+1}`,a:a2})),
+    ];
+    setCat(null);setAns(allAns);
+    // Force screen to result
+    const level=a.nivel_set||4;
+    const lv=SET_L[level]||SET_L[4];
+    setFLv(level);
+    setHist(p=>[{date:new Date().toLocaleString("es-ES",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}),cat:"Voice AI",level,answers:allAns},...p]);
+    setScr("result");
   };
 
   const TPROMPT=(text,prevContext)=>`You are a medical triage system from the Servicio Murciano de Salud (SMS) based on the Sistema Espanol de Triaje (SET) with 5 priority levels, following the NHS Pathways conservative principle.
@@ -818,27 +857,28 @@ Respond ONLY with valid JSON, no markdown, no backticks:
   };
 
   const handleAI=(p)=>{
-    if(!p||typeof p!=="object"){handleAI(localFallback(tx.trim()));return;}
-    setVA(p);
-    // Add translation to conversation log
-    if(p.traduccion_es){
-      setConvLog(prev=>{
-        const updated=[...prev];
-        if(updated.length>0&&!updated[updated.length-1].translation){
-          updated[updated.length-1].translation=p.traduccion_es;
-        }
-        return updated;
-      });
-    }
-    // ALWAYS finish if triaje_completo, no preguntas, or preguntas empty
-    if(p.triaje_completo||!p.preguntas||p.preguntas.length===0||!Array.isArray(p.preguntas)){
-      finishVoice(p,[]);
-    }else{
-      setVFu(p.preguntas.slice(0,2));
-      setVFi(0);setVFa([]);
-      setVP("followup");
-      const qLang=p.codigo_idioma||vLang;
-      setTimeout(()=>startFollowupVoice(p.preguntas[0],qLang,0),500);
+    try{
+      if(!p||typeof p!=="object"){
+        const fb=localFallback(txRef.current.trim()||"sintomas no especificados");
+        setVA(fb);finishVoiceDirect(fb,[]);return;
+      }
+      setVA(p);
+      // Add translation to conversation log
+      if(p.traduccion_es){
+        setConvLog(prev=>{
+          const updated=[...prev];
+          if(updated.length>0&&!updated[updated.length-1].translation){
+            updated[updated.length-1].translation=p.traduccion_es;
+          }
+          return updated;
+        });
+      }
+      // ALWAYS finish — go straight to result with QR
+      finishVoiceDirect(p,[]);
+    }catch(err){
+      console.error("handleAI error:",err);
+      const fb=localFallback(txRef.current.trim()||"error");
+      setVA(fb);finishVoiceDirect(fb,[]);
     }
   };
 
@@ -913,23 +953,7 @@ Respond ONLY with valid JSON:
     finishVoice(vA,allAnswers);
   };
 
-  const finishVoice=(a,fua)=>{
-    window.speechSynthesis?.cancel();
-    const patientText=txRef.current.trim()||tx.trim()||"(voz)";
-    const allAns=[
-      {q:t.patientNarrative,a:patientText},
-      ...(a.traduccion_es&&a.idioma&&a.idioma!=="es"&&a.idioma!=="espanol"&&a.idioma!=="auto"&&a.idioma!=="auto-detectado"?[{q:t.translationLabel+" ("+a.idioma+")",a:a.traduccion_es}]:[]),
-      {q:t.detectedSymptomsLabel,a:(a.sintomas||[]).join(", ")||patientText.slice(0,60)},
-      ...(a.resumen_clinico?[{q:t.clinicalSummary,a:a.resumen_clinico}]:[]),
-      ...(a.discriminadores&&a.discriminadores.length>0?[{q:"Discriminadores SET",a:a.discriminadores.join(", ")}]:[]),
-      ...(a.categoria?[{q:t.consultReason+" (SET)",a:a.categoria}]:[]),
-      ...(a.especialidad?[{q:"Especialidad",a:a.especialidad}]:[]),
-      ...(a.dolor_eva>0?[{q:t.painEVA,a:`${a.dolor_eva}/10`}]:[]),
-      ...(a.destino?[{q:"Destino",a:a.destino}]:[]),
-      ...fua.map((a2,i)=>({q:vFu[i]||`${t.followupQ} ${i+1}`,a:a2})),
-    ];
-    setCat(null);setAns(allAns);finish(a.nivel_set||4,allAns);
-  };
+  const finishVoice=(a,fua)=>finishVoiceDirect(a,fua);
 
   // ─── STYLES ───
   const F="'DM Sans',-apple-system,system-ui,sans-serif";
