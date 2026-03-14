@@ -789,7 +789,7 @@ function App() {
     r.onerror=()=>{setVP("idle");clearInterval(animRef.current);clearTimeout(silenceTimer);};
     r.onend=()=>{clearTimeout(silenceTimer);
       // If we have text and haven't started analyzing yet, auto-analyze
-      if(txRef.current.trim()&&vP!=="analyzing"&&scr!=="result"&&scr!=="scrResult"){autoAnalyze();}
+      if(txRef.current.trim()&&!autoAnalyzeRef.current){autoAnalyze();}
     };
     recRef.current=r;r.start();setVP("recording");
     animRef.current=setInterval(()=>setPulse(p=>(p+1)%100),60);
@@ -797,44 +797,57 @@ function App() {
 
   // Auto-analyze when speech stops — determines mode from current screen
   const autoAnalyzeRef=useRef(false);
+  const scrRef=useRef("home"); // ref to always have fresh scr value
+  useEffect(()=>{scrRef.current=scr;},[scr]);
+
   const autoAnalyze=()=>{
-    if(autoAnalyzeRef.current)return; // prevent double-fire
+    if(autoAnalyzeRef.current)return;
     autoAnalyzeRef.current=true;
     clearInterval(animRef.current);
     const finalText=txRef.current.trim();
     if(!finalText){setVP("idle");autoAnalyzeRef.current=false;return;}
     setTx(finalText);setItm("");setVP("analyzing");
 
-    // Determine if this is SET triage or FarmaCribado screening
-    const isScreening=scr==="scrVoice";
+    const isScreening=scrRef.current==="scrVoice";
 
-    // HARD SAFETY: force result after 8s no matter what
-    const safetyTimer=setTimeout(()=>{
-      if(isScreening){
-        const fb=localScrFallback(finalText);
-        setScrResult(fb);setScrPatient(p=>({...p,voiceText:finalText}));setScr("scrResult");
-      }else{
-        const fb=localFallback(finalText);setVA(fb);finishVoiceDirect(fb,[],finalText);
+    // Force result function — GUARANTEED to show QR
+    const forceResult=()=>{
+      try{
+        if(isScreening){
+          const fb=localScrFallback(finalText);
+          setScrResult(fb);setScrPatient(p=>({...p,voiceText:finalText}));setScr("scrResult");
+        }else{
+          const fb=localFallback(finalText);setVA(fb);finishVoiceDirect(fb,[],finalText);
+        }
+      }catch(e){
+        // Ultimate fallback — cannot fail
+        setFLv(4);setAns([{q:"Relato",a:finalText}]);setScr("result");
       }
       autoAnalyzeRef.current=false;
-    },8000);
+    };
 
-    if(isScreening){
-      callGeminiScr(finalText).then(()=>{clearTimeout(safetyTimer);autoAnalyzeRef.current=false;}).catch(()=>{
+    // SAFETY: force result after 7s
+    const safetyTimer=setTimeout(forceResult,7000);
+
+    // Try Gemini/API
+    const runAnalysis=async()=>{
+      try{
+        if(isScreening){
+          await callGeminiScr(finalText);
+        }else{
+          await callGemini(finalText);
+        }
         clearTimeout(safetyTimer);
-        const fb=localScrFallback(finalText);setScrResult(fb);setScrPatient(p=>({...p,voiceText:finalText}));setScr("scrResult");
         autoAnalyzeRef.current=false;
-      });
-    }else{
-      callGemini(finalText).then(()=>{clearTimeout(safetyTimer);autoAnalyzeRef.current=false;}).catch(()=>{
+      }catch(e){
         clearTimeout(safetyTimer);
-        const fb=localFallback(finalText);setVA(fb);finishVoiceDirect(fb,[],finalText);
-        autoAnalyzeRef.current=false;
-      });
-    }
+        forceResult();
+      }
+    };
+    runAnalysis();
   };
 
-  // Manual stop button (same logic)
+  // Manual stop button
   const stopRec=()=>{
     if(recRef.current)try{recRef.current.stop();}catch(e){}
     clearInterval(animRef.current);
