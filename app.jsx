@@ -754,14 +754,13 @@ STRICT INSTRUCTIONS:
 2. ALWAYS translate the patient's words to Spanish for the healthcare professional
 3. Classify according to SET: I(Resuscitation) II(Emergency) III(Urgency) IV(Standard) V(Non-urgent)
 4. Identify severity discriminators
-5. If you need more info to classify accurately, generate 1-2 follow-up questions IN THE PATIENT'S DETECTED LANGUAGE
-6. Generate clinical summary in Spanish
-7. Follow-up questions should be natural, conversational, as if a nurse is asking
+5. IMPORTANT: Try to COMPLETE the triage with the information given. Only ask follow-up questions if CRITICAL information is missing to differentiate between levels. For levels I and II, NEVER ask follow-ups — classify immediately.
+6. Generate a COMPLETE clinical summary in Spanish that a doctor can read directly
+7. If follow-up questions are absolutely needed (max 2), write them IN THE PATIENT'S DETECTED LANGUAGE, conversational style
+8. Include recommended specialty and destination
 ${prevContext?`\nPREVIOUS CONVERSATION:\n${prevContext}\n`:""}
 Respond ONLY with valid JSON, no markdown, no backticks:
-{"idioma":"detected language name","codigo_idioma":"BCP47 code like es-ES, en-US, ar-SA, fr-FR etc","traduccion_es":"full Spanish translation of what patient said","nivel_set":1-5,"categoria":"SET symptomatic category in Spanish","sintomas":["symptom1 in Spanish","symptom2"],"discriminadores":["discriminator1 in Spanish"],"dolor_eva":0-10,"resumen_clinico":"clinical summary in Spanish for the professional","preguntas":["follow-up question 1 IN PATIENT LANGUAGE","question 2 IN PATIENT LANGUAGE"],"destino":"urgencias|suap|centro_salud|farmacia","especialidad":"specialty in Spanish","triaje_completo":true or false}
-
-Patient says: "${text}"`;
+{"idioma":"detected language name","codigo_idioma":"BCP47 code","traduccion_es":"complete Spanish translation","nivel_set":1-5,"categoria":"SET category in Spanish","sintomas":["symptom1 in Spanish"],"discriminadores":["discriminator in Spanish"],"dolor_eva":0-10,"resumen_clinico":"DETAILED clinical summary in Spanish: age if mentioned, symptoms, onset, severity, relevant history, suspected diagnosis, recommended actions","preguntas":[],"destino":"urgencias|suap|centro_salud|farmacia","especialidad":"specialty in Spanish","triaje_completo":true}`;
 
   const callGemini=async(text,prevContext)=>{
     const prompt=TPROMPT(text,prevContext);
@@ -896,10 +895,13 @@ Respond ONLY with valid JSON:
       {q:t.patientNarrative,a:tx.trim()},
       ...(a.traduccion_es&&a.idioma&&a.idioma!=="es"&&a.idioma!=="espanol"&&a.idioma!=="auto"?[{q:t.translationLabel+" ("+a.idioma+")",a:a.traduccion_es}]:[]),
       {q:t.detectedSymptomsLabel,a:(a.sintomas||[]).join(", ")},
-      {q:t.clinicalSummary,a:a.resumen_clinico||""},
-      ...fua.map((a2,i)=>({q:vFu[i]||`${t.followupQ} ${i+1}`,a:a2})),
+      ...(a.resumen_clinico?[{q:t.clinicalSummary,a:a.resumen_clinico}]:[]),
       ...(a.discriminadores&&a.discriminadores.length>0?[{q:"Discriminadores SET",a:a.discriminadores.join(", ")}]:[]),
+      ...(a.categoria?[{q:t.consultReason+" (SET)",a:a.categoria}]:[]),
       ...(a.especialidad?[{q:"Especialidad",a:a.especialidad}]:[]),
+      ...(a.dolor_eva>0?[{q:t.painEVA,a:`${a.dolor_eva}/10`}]:[]),
+      ...(a.destino?[{q:"Destino",a:a.destino}]:[]),
+      ...fua.map((a2,i)=>({q:vFu[i]||`${t.followupQ} ${i+1}`,a:a2})),
     ];
     setCat(null);setAns(allAns);finish(a.nivel_set||4,allAns);
   };
@@ -1047,7 +1049,30 @@ Respond ONLY with valid JSON:
 
   const renderResult=()=>{
     const lv=SET_L[fLv]||SET_L[4];const dest=DEST_L[fLv]||DEST_L[4];
-    const qrData=JSON.stringify({app:"TriajeSalud",v:3,ts:Date.now(),set:fLv,cat:cat?CATS.find(c=>c.id===cat)?.es:"VoiceAI",ans:ans.slice(0,10)});
+    const isVoice=!cat;
+    // Rich QR payload with full clinical data
+    const qrPayload={
+      app:"TriajeSalud",v:3,ts:Date.now(),
+      set_level:fLv,set_name:lv.n,
+      category:cat?CATS.find(c=>c.id===cat)?.es:"Triaje por voz IA",
+      destination:dest,
+      answers:ans.map(a=>({q:a.q,a:a.a})).slice(0,12),
+      voice_triage:isVoice,
+    };
+    // Add Gemini analysis data if available from voice triage
+    if(isVoice&&vA){
+      qrPayload.ai_analysis={
+        detected_language:vA.idioma||"es",
+        translation:vA.traduccion_es||"",
+        symptoms:vA.sintomas||[],
+        discriminators:vA.discriminadores||[],
+        pain_eva:vA.dolor_eva||0,
+        clinical_summary:vA.resumen_clinico||"",
+        specialty:vA.especialidad||"",
+        destination:vA.destino||"",
+      };
+    }
+    const qrData=JSON.stringify(qrPayload);
     return <div style={{padding:"20px 16px",maxWidth:480,margin:"0 auto"}}>
       <div style={{background:lv.bg,border:`2px solid ${lv.bd}`,borderRadius:16,padding:22,textAlign:"center",marginBottom:14}}>
         <div style={{width:56,height:56,borderRadius:14,background:lv.c,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 10px",boxShadow:`0 4px 14px ${lv.c}30`}}>
@@ -1058,10 +1083,24 @@ Respond ONLY with valid JSON:
         <p style={{fontSize:13,color:"#334155",margin:"10px 0 0",lineHeight:1.5}}>{dest}</p>
       </div>
       {fLv<=2&&<a href="tel:112" style={{display:"block",padding:"14px",background:"#dc2626",color:"#fff",borderRadius:12,fontSize:17,fontWeight:800,textAlign:"center",textDecoration:"none",marginBottom:10,fontFamily:F}}>{t.call112}</a>}
-      {fLv<=4&&<div style={{background:"#fff",borderRadius:14,padding:18,border:"1px solid #e2e8f0",textAlign:"center",marginBottom:10}}>
+      {/* QR always shown — for ALL levels, both manual and voice triage */}
+      <div style={{background:"#fff",borderRadius:14,padding:18,border:"1px solid #e2e8f0",textAlign:"center",marginBottom:10}}>
         <p style={{fontSize:12,color:"#64748b",margin:"0 0 10px"}}>{t.qrTitle}</p>
-        <QRBox data={qrData} size={170}/>
+        <QRBox data={qrData} size={180}/>
         <p style={{fontSize:10,color:"#94a3b8",margin:"8px 0 0"}}>{t.qrSub}</p>
+        {isVoice&&vA&&vA.resumen_clinico&&<div style={{marginTop:10,padding:10,background:"#f8fafc",borderRadius:8,textAlign:"left"}}>
+          <div style={{fontSize:10,fontWeight:600,color:"#475569",marginBottom:4}}>{t.clinicalSummary} (QR)</div>
+          <div style={{fontSize:11,color:"#1e293b",lineHeight:1.4}}>{vA.resumen_clinico}</div>
+        </div>}
+      </div>
+      {/* Conversation log for voice triage */}
+      {isVoice&&convLog.length>0&&<div style={{background:"#fff",borderRadius:14,padding:14,border:"1px solid #e2e8f0",marginBottom:10}}>
+        <h4 style={{margin:"0 0 8px",fontSize:13,fontFamily:F,color:"#334155"}}>{t.voiceConversation}</h4>
+        {convLog.map((c,i)=><div key={i} style={{padding:"4px 0",borderBottom:i<convLog.length-1?"1px solid #f8fafc":"none"}}>
+          <div style={{fontSize:10,color:c.role==="patient"?"#0369a1":"#7c3aed",fontWeight:600}}>{c.role==="patient"?t.originalLabel:t.speakingQuestion}</div>
+          <div style={{fontSize:12,color:"#1e293b"}}>{c.text}</div>
+          {c.translation&&<div style={{fontSize:11,color:"#64748b",fontStyle:"italic"}}>{t.translationLabel}: {c.translation}</div>}
+        </div>)}
       </div>}
       <div style={{background:"#fff",borderRadius:14,padding:14,border:"1px solid #e2e8f0",marginBottom:10}}>
         <h4 style={{margin:"0 0 8px",fontSize:13,fontFamily:F,color:"#334155"}}>{t.summaryTitle}</h4>
