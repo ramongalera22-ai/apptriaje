@@ -57,6 +57,10 @@ const T = {
     nhsNote: "Principio NHS Pathways: cuantas menos preguntas, mas grave es la situacion. Si su caso es critico, sera derivado rapidamente.",
     resuscitation: "Resucitacion", emergency: "Emergencia", urgency: "Urgencia", standard: "Estandar", nonUrgent: "No urgente",
     immediate: "Inmediato",
+    timerGlobal: "Tiempo total", timerQuestion: "Tiempo para responder",
+    timerExpired: "Tiempo agotado — triaje finalizado con los datos disponibles",
+    autoFinish: "Sin respuesta — continuando automaticamente",
+    secondsLeft: "s",
   },
   en: {
     appName: "TriageSalud", subtitle: "Spanish Triage System — Area II Cartagena",
@@ -108,6 +112,10 @@ const T = {
     nhsNote: "NHS Pathways principle: the fewer questions asked, the more serious the condition. If your case is critical, you will be referred quickly.",
     resuscitation: "Resuscitation", emergency: "Emergency", urgency: "Urgency", standard: "Standard", nonUrgent: "Non-urgent",
     immediate: "Immediate",
+    timerGlobal: "Total time", timerQuestion: "Time to answer",
+    timerExpired: "Time expired — triage completed with available data",
+    autoFinish: "No response — continuing automatically",
+    secondsLeft: "s",
   },
   fr: {
     appName: "TriageSalud", subtitle: "Systeme Espagnol de Triage — Zone II Cartagena",
@@ -159,6 +167,10 @@ const T = {
     nhsNote: "Principe NHS Pathways : moins le systeme pose de questions, plus la situation est grave. Si votre cas est critique, vous serez oriente rapidement.",
     resuscitation: "Reanimation", emergency: "Urgence vitale", urgency: "Urgence", standard: "Standard", nonUrgent: "Non urgent",
     immediate: "Immediat",
+    timerGlobal: "Temps total", timerQuestion: "Temps pour repondre",
+    timerExpired: "Temps ecoule — triage termine avec les donnees disponibles",
+    autoFinish: "Pas de reponse — continuation automatique",
+    secondsLeft: "s",
   },
   ar: {
     appName: "TriajeSalud", subtitle: "نظام الفرز الاسباني — المنطقة الثانية قرطاجنة",
@@ -210,6 +222,10 @@ const T = {
     nhsNote: "مبدأ NHS Pathways: كلما قل عدد الأسئلة، زادت خطورة الحالة.",
     resuscitation: "إنعاش", emergency: "طوارئ", urgency: "مستعجل", standard: "عادي", nonUrgent: "غير مستعجل",
     immediate: "فوري",
+    timerGlobal: "الوقت الكلي", timerQuestion: "وقت الإجابة",
+    timerExpired: "انتهى الوقت — تم الفرز بالبيانات المتاحة",
+    autoFinish: "بدون إجابة — متابعة تلقائية",
+    secondsLeft: "ث",
   },
 };
 
@@ -471,6 +487,14 @@ function App() {
   const [hist,setHist]=useState([]);
   const [accepted,setAccepted]=useState(false);
 
+  // Timers
+  const [globalTime,setGlobalTime]=useState(30);
+  const [questionTime,setQuestionTime]=useState(7);
+  const [triageStarted,setTriageStarted]=useState(false);
+  const globalTimerRef=useRef(null);
+  const questionTimerRef=useRef(null);
+  const triageFinishedRef=useRef(false);
+
   // Voice
   const [vP,setVP]=useState("idle");
   const [tx,setTx]=useState("");
@@ -489,15 +513,94 @@ function App() {
 
   useEffect(()=>{scrollRef.current?.scrollTo(0,0);},[scr,dI,qI,vP,vFi]);
 
+  // Global 30s timer — starts when triage begins, ends the triage when it hits 0
+  useEffect(()=>{
+    if(triageStarted&&scr==="triage"&&!triageFinishedRef.current){
+      clearInterval(globalTimerRef.current);
+      globalTimerRef.current=setInterval(()=>{
+        setGlobalTime(prev=>{
+          if(prev<=1){
+            clearInterval(globalTimerRef.current);
+            clearInterval(questionTimerRef.current);
+            if(!triageFinishedRef.current){triageFinishedRef.current=true;forceFinish();}
+            return 0;
+          }
+          return prev-1;
+        });
+      },1000);
+      return ()=>clearInterval(globalTimerRef.current);
+    }
+  },[triageStarted,scr]);
+
+  // Per-question 7s timer — resets on each new question/discriminator step
+  useEffect(()=>{
+    if(triageStarted&&scr==="triage"&&!triageFinishedRef.current){
+      setQuestionTime(7);
+      clearInterval(questionTimerRef.current);
+      questionTimerRef.current=setInterval(()=>{
+        setQuestionTime(prev=>{
+          if(prev<=1){
+            clearInterval(questionTimerRef.current);
+            if(!triageFinishedRef.current){autoAdvance();}
+            return 0;
+          }
+          return prev-1;
+        });
+      },1000);
+      return ()=>clearInterval(questionTimerRef.current);
+    }
+  },[dI,qI,triageStarted,scr,ans.length]);
+
+  // Force finish with whatever data we have
+  const forceFinish=()=>{
+    clearInterval(globalTimerRef.current);
+    clearInterval(questionTimerRef.current);
+    const lv=computeLevel();
+    finish(lv);
+  };
+
+  // Auto-advance: skip current question with neutral answer
+  const autoAdvance=()=>{
+    const flow=FLOWS[cat];if(!flow)return;
+    const discs=flow.disc||[];const qs=flow.qs||[];
+    // If on discriminators, treat as "No"
+    if(dI<discs.length&&!dLv){
+      setAns(a=>[...a,{q:discs[dI],a:t.autoFinish}]);
+      setDI(prev=>prev+1);
+      return;
+    }
+    // If on pain scale, skip with current value
+    if(flow.painScale&&!ans.find(a=>a.q===t.painEVA)){
+      setAns(a=>[...a,{q:t.painEVA,a:`${pain}/10`}]);
+      return;
+    }
+    // If on questions, skip with first (least severe) option
+    if(qI<qs.length){
+      const cq=qs[qI];
+      const first=cq.opts[0];
+      setAns(a=>[...a,{q:cq.q,a:t.autoFinish}]);
+      setQS(s=>s+(first?first.v:0));
+      setQI(qi=>qi+1);
+      return;
+    }
+    // Otherwise finish
+    if(!triageFinishedRef.current){triageFinishedRef.current=true;forceFinish();}
+  };
+
   const saveK=(k)=>{setGemK(k);try{localStorage.setItem("gk",k);}catch(e){}};
 
   const reset=()=>{
+    clearInterval(globalTimerRef.current);clearInterval(questionTimerRef.current);
+    triageFinishedRef.current=false;
     setCat(null);setDI(0);setDLv(null);setQI(0);setPain(0);setQS(0);
     setAns([]);setFLv(null);setScr("home");setAccepted(false);
+    setGlobalTime(30);setQuestionTime(7);setTriageStarted(false);
     setVP("idle");setTx("");setItm("");setVA(null);setVFu([]);setVFi(0);setVFa([]);
   };
 
   const finish=(level,a)=>{
+    clearInterval(globalTimerRef.current);clearInterval(questionTimerRef.current);
+    triageFinishedRef.current=true;setTriageStarted(false);
     const e={date:new Date().toLocaleString(lang==="ar"?"ar-SA":lang+"-"+lang.toUpperCase(),{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}),cat:cat?CATS.find(c=>c.id===cat)?.[lang]||CATS.find(c=>c.id===cat)?.es:"Voice AI",level,answers:a||ans};
     setFLv(level);setHist(p=>[e,...p]);setScr("result");
   };
@@ -652,7 +755,7 @@ Patient says: "${text}"`;
     <h2 style={{margin:"0 0 4px",fontSize:18,fontFamily:F,color:"#0c4a6e"}}>{t.selectSymptom}</h2>
     <p style={{color:"#64748b",fontSize:12,margin:"0 0 14px"}}>{t.selectSymptomSub}</p>
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
-      {CATS.map(c=><button key={c.id} onClick={()=>{setCat(c.id);setDI(0);setDLv(null);setQI(0);setPain(0);setQS(0);setAns([{q:t.consultReason,a:c[lang]||c.es}]);setScr("triage");}}
+      {CATS.map(c=><button key={c.id} onClick={()=>{setCat(c.id);setDI(0);setDLv(null);setQI(0);setPain(0);setQS(0);setAns([{q:t.consultReason,a:c[lang]||c.es}]);setGlobalTime(30);setQuestionTime(7);triageFinishedRef.current=false;setTriageStarted(true);setScr("triage");}}
         style={{padding:"12px 10px",background:"#fff",border:"1.5px solid #e2e8f0",borderRadius:10,cursor:"pointer",fontSize:13,fontWeight:600,color:"#1e293b",textAlign:"left",fontFamily:F,transition:"all .1s",lineHeight:1.3}}
         onMouseOver={e=>{e.currentTarget.style.borderColor="#0077B6";e.currentTarget.style.background="#f0f9ff";}}
         onMouseOut={e=>{e.currentTarget.style.borderColor="#e2e8f0";e.currentTarget.style.background="#fff";}}>
@@ -664,9 +767,29 @@ Patient says: "${text}"`;
   const renderTriage=()=>{
     const flow=FLOWS[cat];if(!flow)return null;
     const discs=flow.disc||[];const qs=flow.qs||[];
+
+    // Timer bar component
+    const TimerBars=()=><div style={{marginBottom:14}}>
+      {/* Global 30s bar */}
+      <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
+        <span style={{fontSize:10,color:globalTime<=10?"#dc2626":"#64748b",fontWeight:600,whiteSpace:"nowrap",minWidth:70}}>{t.timerGlobal}: {globalTime}{t.secondsLeft}</span>
+        <div style={{flex:1,height:6,background:"#e2e8f0",borderRadius:3,overflow:"hidden"}}>
+          <div style={{width:`${(globalTime/30)*100}%`,height:"100%",borderRadius:3,transition:"width 1s linear",background:globalTime<=10?"#dc2626":globalTime<=20?"#f59e0b":"#0077B6"}}/>
+        </div>
+      </div>
+      {/* Per-question 7s bar */}
+      <div style={{display:"flex",alignItems:"center",gap:6}}>
+        <span style={{fontSize:10,color:questionTime<=3?"#dc2626":"#94a3b8",fontWeight:600,whiteSpace:"nowrap",minWidth:70}}>{t.timerQuestion}: {questionTime}{t.secondsLeft}</span>
+        <div style={{flex:1,height:4,background:"#e2e8f0",borderRadius:2,overflow:"hidden"}}>
+          <div style={{width:`${(questionTime/7)*100}%`,height:"100%",borderRadius:2,transition:"width 1s linear",background:questionTime<=3?"#dc2626":questionTime<=5?"#f59e0b":"#22c55e"}}/>
+        </div>
+      </div>
+    </div>;
+
     // Discriminators
     if(dI<discs.length&&!dLv){
       return <div style={{padding:"20px 16px",maxWidth:480,margin:"0 auto"}}>
+        <TimerBars/>
         <div style={{background:"#fef2f2",border:"1.5px solid #fca5a5",borderRadius:12,padding:14,marginBottom:14}}>
           <div style={{fontSize:11,fontWeight:700,color:"#dc2626",textTransform:"uppercase",letterSpacing:0.5,marginBottom:6}}>{t.discriminatorTitle}</div>
           <p style={{fontSize:14,color:"#7f1d1d",margin:0,lineHeight:1.5,fontWeight:500}}>{discs[dI]}</p>
@@ -684,6 +807,7 @@ Patient says: "${text}"`;
     // Pain
     if(flow.painScale&&!ans.find(a=>a.q===t.painEVA)){
       return <div style={{padding:"20px 16px",maxWidth:480,margin:"0 auto"}}>
+        <TimerBars/>
         <h3 style={{margin:"0 0 4px",fontSize:16,fontFamily:F,color:"#0c4a6e"}}>{t.painTitle}</h3>
         <p style={{color:"#64748b",fontSize:12,margin:"0 0 14px"}}>{t.painSub}</p>
         <PainScale value={pain} onChange={setPain} t={t}/>
@@ -694,6 +818,7 @@ Patient says: "${text}"`;
     if(qI<qs.length){
       const cq=qs[qI];
       return <div style={{padding:"20px 16px",maxWidth:480,margin:"0 auto"}}>
+        <TimerBars/>
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
           <div style={{flex:1,height:4,background:"#e2e8f0",borderRadius:2}}>
             <div style={{width:`${((qI+1)/qs.length)*100}%`,height:"100%",background:"#0077B6",borderRadius:2,transition:"width .3s"}}/>
