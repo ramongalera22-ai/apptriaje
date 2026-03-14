@@ -786,7 +786,7 @@ function App() {
     });
   };
 
-  const startVoice=()=>{setScr("voice");setVP("idle");setTx("");setItm("");setConvLog([]);setVA(null);setVFu([]);setVFi(0);setVFa([]);};
+  const startVoice=()=>{setScr("voice");setVP("idle");setTx("");setItm("");setConvLog([]);setVA(null);setVFu([]);setVFi(0);setVFa([]);autoAnalyzeRef.current=false;};;
 
   const txRef=useRef("");
 
@@ -795,37 +795,65 @@ function App() {
     if(!SR){alert(t.browserNoVoice);return;}
     const r=new SR();r.lang=vLang;r.continuous=true;r.interimResults=true;
     txRef.current="";
-    r.onresult=e=>{let fin="",int="";for(let i=e.resultIndex;i<e.results.length;i++){if(e.results[i].isFinal)fin+=e.results[i][0].transcript+" ";else int=e.results[i][0].transcript;}if(fin){txRef.current+=fin;setTx(txRef.current);}setItm(int);};
-    r.onerror=()=>{setVP("idle");clearInterval(animRef.current);};
-    r.onend=()=>{};
+    let silenceTimer=null;
+    r.onresult=e=>{let fin="",int="";for(let i=e.resultIndex;i<e.results.length;i++){if(e.results[i].isFinal)fin+=e.results[i][0].transcript+" ";else int=e.results[i][0].transcript;}if(fin){txRef.current+=fin;setTx(txRef.current);}setItm(int);
+      // Auto-stop after 3s silence once we have text
+      clearTimeout(silenceTimer);
+      if(txRef.current.trim()){silenceTimer=setTimeout(()=>{try{r.stop();}catch(e){}autoAnalyze();},3000);}
+    };
+    r.onerror=()=>{setVP("idle");clearInterval(animRef.current);clearTimeout(silenceTimer);};
+    r.onend=()=>{clearTimeout(silenceTimer);
+      // If we have text and haven't started analyzing yet, auto-analyze
+      if(txRef.current.trim()&&vP!=="analyzing"&&scr!=="result"&&scr!=="scrResult"){autoAnalyze();}
+    };
     recRef.current=r;r.start();setVP("recording");
     animRef.current=setInterval(()=>setPulse(p=>(p+1)%100),60);
   };
 
+  // Auto-analyze when speech stops — determines mode from current screen
+  const autoAnalyzeRef=useRef(false);
+  const autoAnalyze=()=>{
+    if(autoAnalyzeRef.current)return; // prevent double-fire
+    autoAnalyzeRef.current=true;
+    clearInterval(animRef.current);
+    const finalText=txRef.current.trim();
+    if(!finalText){setVP("idle");autoAnalyzeRef.current=false;return;}
+    setTx(finalText);setItm("");setVP("analyzing");
+
+    // Determine if this is SET triage or FarmaCribado screening
+    const isScreening=scr==="scrVoice";
+
+    // HARD SAFETY: force result after 8s no matter what
+    const safetyTimer=setTimeout(()=>{
+      if(isScreening){
+        const fb=localScrFallback(finalText);
+        setScrResult(fb);setScrPatient(p=>({...p,voiceText:finalText}));setScr("scrResult");
+      }else{
+        const fb=localFallback(finalText);setVA(fb);finishVoiceDirect(fb,[],finalText);
+      }
+      autoAnalyzeRef.current=false;
+    },8000);
+
+    if(isScreening){
+      callGeminiScr(finalText).then(()=>{clearTimeout(safetyTimer);autoAnalyzeRef.current=false;}).catch(()=>{
+        clearTimeout(safetyTimer);
+        const fb=localScrFallback(finalText);setScrResult(fb);setScrPatient(p=>({...p,voiceText:finalText}));setScr("scrResult");
+        autoAnalyzeRef.current=false;
+      });
+    }else{
+      callGemini(finalText).then(()=>{clearTimeout(safetyTimer);autoAnalyzeRef.current=false;}).catch(()=>{
+        clearTimeout(safetyTimer);
+        const fb=localFallback(finalText);setVA(fb);finishVoiceDirect(fb,[],finalText);
+        autoAnalyzeRef.current=false;
+      });
+    }
+  };
+
+  // Manual stop button (same logic)
   const stopRec=()=>{
     if(recRef.current)try{recRef.current.stop();}catch(e){}
     clearInterval(animRef.current);
-    const finalText=txRef.current.trim();
-    if(!finalText){setVP("idle");return;}
-    setTx(finalText);
-    setConvLog([{role:"patient",text:finalText,lang:vLang}]);
-    setVP("analyzing");
-    // HARD SAFETY: if still analyzing after 8s, force local result
-    const safetyTimer=setTimeout(()=>{
-      console.warn("Safety timeout — forcing local result");
-      const fb=localFallback(finalText);
-      setVA(fb);
-      finishVoiceDirect(fb,[],finalText);
-    },8000);
-    // Try APIs
-    callGemini(finalText).then(()=>{
-      clearTimeout(safetyTimer);
-    }).catch(()=>{
-      clearTimeout(safetyTimer);
-      const fb=localFallback(finalText);
-      setVA(fb);
-      finishVoiceDirect(fb,[],finalText);
-    });
+    autoAnalyze();
   };
 
   // Direct finish that doesn't depend on state
@@ -1043,7 +1071,7 @@ Respond ONLY with valid JSON:
     <div style={{borderTop:"1px solid #e2e8f0",paddingTop:14,marginBottom:8}}>
       <div style={{fontSize:11,fontWeight:700,color:"#0F4C5C",marginBottom:8,textTransform:"uppercase",letterSpacing:"0.05em"}}>FarmaCribado</div>
       <button onClick={()=>setScr("scrHome")} style={{...btnS("linear-gradient(135deg,#0F4C5C,#0E7490)"),marginBottom:8}}>Cribado farmaceutico</button>
-      <button onClick={()=>{setScr("scrVoice");setVP("idle");setTx("");setItm("");txRef.current="";}} style={{...btnS("linear-gradient(135deg,#059669,#047857)"),marginBottom:14,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+      <button onClick={()=>{setScr("scrVoice");setVP("idle");setTx("");setItm("");txRef.current="";autoAnalyzeRef.current=false;}} style={{...btnS("linear-gradient(135deg,#059669,#047857)"),marginBottom:14,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
         <span>Cribado por voz</span><span style={{fontSize:10,background:"rgba(255,255,255,0.2)",padding:"2px 7px",borderRadius:6}}>AI</span>
       </button>
     </div>
@@ -1309,6 +1337,7 @@ Respond ONLY with valid JSON:
       <button onClick={stopRec} style={btnS(tx.trim()?"linear-gradient(135deg,#0077B6,#0096C7)":"#e2e8f0",tx.trim()?"#fff":"#94a3b8")}>
         {tx.trim()?t.analyzeBtn:t.speakToContinue}
       </button>
+      {tx.trim()&&<div style={{fontSize:10,color:"#7c3aed",textAlign:"center",marginTop:6}}>Se analizara automaticamente al dejar de hablar</div>}
     </div>;
 
     if(vP==="analyzing"||vP==="processing")return <div style={{padding:"40px 16px",maxWidth:480,margin:"0 auto",textAlign:"center"}}>
@@ -1574,18 +1603,8 @@ Respond ONLY with valid JSON:
             {!tx&&!itm&&<span style={{color:"#d4d4d8",fontStyle:"italic"}}>{t.listening}</span>}
           </p>
         </div>
-        <button onClick={()=>{
-          if(recRef.current)try{recRef.current.stop();}catch(e){}
-          clearInterval(animRef.current);
-          const ft=txRef.current.trim();if(!ft){setVP("idle");return;}
-          setTx(ft);setVP("analyzing");
-          const safety=setTimeout(()=>{
-            const fb=localScrFallback(ft);setScrResult(fb);setScrPatient(p=>({...p,voiceText:ft}));setScr("scrResult");
-          },10000);
-          callGeminiScr(ft).then(()=>clearTimeout(safety)).catch(()=>{clearTimeout(safety);
-            const fb=localScrFallback(ft);setScrResult(fb);setScrPatient(p=>({...p,voiceText:ft}));setScr("scrResult");
-          });
-        }} style={btnS(tx.trim()?"linear-gradient(135deg,#059669,#047857)":"#e2e8f0",tx.trim()?"#fff":"#94a3b8")}>{tx.trim()?t.analyzeBtn:t.speakToContinue}</button>
+        <button onClick={stopRec} style={btnS(tx.trim()?"linear-gradient(135deg,#059669,#047857)":"#e2e8f0",tx.trim()?"#fff":"#94a3b8")}>{tx.trim()?t.analyzeBtn:t.speakToContinue}</button>
+        {tx.trim()&&<div style={{fontSize:10,color:"#059669",textAlign:"center",marginTop:6}}>Se analizara automaticamente al dejar de hablar</div>}
       </div>;
     }
     if(vP==="analyzing")return <div style={{padding:"50px 16px",maxWidth:480,margin:"0 auto",textAlign:"center"}}>
