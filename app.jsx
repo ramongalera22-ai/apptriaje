@@ -61,6 +61,18 @@ const T = {
     timerExpired: "Tiempo agotado — triaje finalizado con los datos disponibles",
     autoFinish: "Sin respuesta — continuando automaticamente",
     secondsLeft: "s",
+    voiceConversation: "Triaje conversacional por voz",
+    speakNow: "Hable ahora...",
+    translationLabel: "Traduccion",
+    originalLabel: "Original",
+    answerByVoice: "Responder por voz",
+    answerByText: "Responder por texto",
+    voiceFollowupIntro: "Necesito hacerle unas preguntas adicionales. Puede responder hablando.",
+    listeningAnswer: "Escuchando su respuesta...",
+    processingAnswer: "Procesando respuesta...",
+    round: "Ronda",
+    voiceTriageComplete: "Triaje por voz completado",
+    speakingQuestion: "Leyendo pregunta...",
   },
   en: {
     appName: "TriageSalud", subtitle: "Spanish Triage System — Area II Cartagena",
@@ -116,6 +128,18 @@ const T = {
     timerExpired: "Time expired — triage completed with available data",
     autoFinish: "No response — continuing automatically",
     secondsLeft: "s",
+    voiceConversation: "Conversational voice triage",
+    speakNow: "Speak now...",
+    translationLabel: "Translation",
+    originalLabel: "Original",
+    answerByVoice: "Answer by voice",
+    answerByText: "Answer by text",
+    voiceFollowupIntro: "I need to ask you some additional questions. You can answer by speaking.",
+    listeningAnswer: "Listening to your answer...",
+    processingAnswer: "Processing answer...",
+    round: "Round",
+    voiceTriageComplete: "Voice triage completed",
+    speakingQuestion: "Reading question...",
   },
   fr: {
     appName: "TriageSalud", subtitle: "Systeme Espagnol de Triage — Zone II Cartagena",
@@ -171,6 +195,18 @@ const T = {
     timerExpired: "Temps ecoule — triage termine avec les donnees disponibles",
     autoFinish: "Pas de reponse — continuation automatique",
     secondsLeft: "s",
+    voiceConversation: "Triage conversationnel vocal",
+    speakNow: "Parlez maintenant...",
+    translationLabel: "Traduction",
+    originalLabel: "Original",
+    answerByVoice: "Repondre par la voix",
+    answerByText: "Repondre par ecrit",
+    voiceFollowupIntro: "Je dois vous poser quelques questions supplementaires. Vous pouvez repondre en parlant.",
+    listeningAnswer: "Ecoute de votre reponse...",
+    processingAnswer: "Traitement de la reponse...",
+    round: "Tour",
+    voiceTriageComplete: "Triage vocal termine",
+    speakingQuestion: "Lecture de la question...",
   },
   ar: {
     appName: "TriajeSalud", subtitle: "نظام الفرز الاسباني — المنطقة الثانية قرطاجنة",
@@ -226,6 +262,18 @@ const T = {
     timerExpired: "انتهى الوقت — تم الفرز بالبيانات المتاحة",
     autoFinish: "بدون إجابة — متابعة تلقائية",
     secondsLeft: "ث",
+    voiceConversation: "فرز محادثة صوتية",
+    speakNow: "...تحدث الآن",
+    translationLabel: "الترجمة",
+    originalLabel: "الأصلي",
+    answerByVoice: "الإجابة بالصوت",
+    answerByText: "الإجابة بالنص",
+    voiceFollowupIntro: "أحتاج لطرح بعض الأسئلة الإضافية. يمكنك الإجابة بالتحدث.",
+    listeningAnswer: "...الاستماع لإجابتك",
+    processingAnswer: "...معالجة الإجابة",
+    round: "جولة",
+    voiceTriageComplete: "اكتمل الفرز الصوتي",
+    speakingQuestion: "...قراءة السؤال",
   },
 };
 
@@ -616,8 +664,69 @@ function App() {
     return 5;
   };
 
-  // ─── GEMINI VOICE ───
-  const startVoice=()=>{setScr("voice");setVP("idle");setTx("");setItm("");};
+  // ─── CONVERSATIONAL VOICE TRIAGE WITH GEMINI ───
+  const [gemK,setGemK]=useState(()=>{try{return localStorage.getItem("gk")||"";}catch(e){return"";}});
+  const [showKey,setShowKey]=useState(false);
+  const [vLang,setVLang]=useState("es-ES");
+  const [vP,setVP]=useState("idle"); // idle,recording,analyzing,followup,listening,processing
+  const [tx,setTx]=useState("");
+  const [itm,setItm]=useState("");
+  const [vA,setVA]=useState(null);
+  const [vFu,setVFu]=useState([]);
+  const [vFi,setVFi]=useState(0);
+  const [vFa,setVFa]=useState([]);
+  const [pulse,setPulse]=useState(0);
+  const [convLog,setConvLog]=useState([]); // conversation log [{role,text,translation}]
+  const [isSpeaking,setIsSpeaking]=useState(false);
+  const recRef=useRef(null);
+  const animRef=useRef(null);
+
+  const saveK=(k)=>{setGemK(k);try{localStorage.setItem("gk",k);}catch(e){}};
+
+  // Speech synthesis — reads question aloud in patient's language
+  const speakText=(text,langCode)=>{
+    return new Promise((resolve)=>{
+      if(!window.speechSynthesis){resolve();return;}
+      window.speechSynthesis.cancel();
+      const u=new SpeechSynthesisUtterance(text);
+      u.lang=langCode||vLang;
+      u.rate=0.95;
+      u.onend=()=>{setIsSpeaking(false);resolve();};
+      u.onerror=()=>{setIsSpeaking(false);resolve();};
+      setIsSpeaking(true);
+      window.speechSynthesis.speak(u);
+    });
+  };
+
+  // Voice recognition for a single answer
+  const listenOnce=()=>{
+    return new Promise((resolve)=>{
+      const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+      if(!SR){resolve("");return;}
+      const r=new SR();
+      r.lang=vLang;r.continuous=false;r.interimResults=true;
+      let result="";let timeout=null;
+      r.onresult=e=>{
+        let fin="",interim="";
+        for(let i=e.resultIndex;i<e.results.length;i++){
+          if(e.results[i].isFinal)fin+=e.results[i][0].transcript+" ";
+          else interim=e.results[i][0].transcript;
+        }
+        if(fin)result+=fin;
+        setItm(interim);
+        // Reset silence timeout on speech
+        clearTimeout(timeout);
+        timeout=setTimeout(()=>{try{r.stop();}catch(e){}},3000);
+      };
+      r.onend=()=>{clearTimeout(timeout);setItm("");resolve(result.trim());};
+      r.onerror=()=>{clearTimeout(timeout);setItm("");resolve(result.trim());};
+      r.start();
+      // Auto-stop after 15 seconds max
+      timeout=setTimeout(()=>{try{r.stop();}catch(e){}},15000);
+    });
+  };
+
+  const startVoice=()=>{setScr("voice");setVP("idle");setTx("");setItm("");setConvLog([]);setVA(null);setVFu([]);setVFi(0);setVFa([]);};
 
   const startRec=()=>{
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
@@ -634,30 +743,33 @@ function App() {
     if(recRef.current)try{recRef.current.stop();}catch(e){}
     clearInterval(animRef.current);
     if(!tx.trim()){setVP("idle");return;}
+    setConvLog([{role:"patient",text:tx.trim(),lang:vLang}]);
     setVP("analyzing");callGemini(tx.trim());
   };
 
-  const TPROMPT=(text)=>`You are a medical triage system from the Servicio Murciano de Salud (SMS) based on the Sistema Espanol de Triaje (SET) with 5 priority levels, following the NHS Pathways conservative principle.
+  const TPROMPT=(text,prevContext)=>`You are a medical triage system from the Servicio Murciano de Salud (SMS) based on the Sistema Espanol de Triaje (SET) with 5 priority levels, following the NHS Pathways conservative principle.
 
 STRICT INSTRUCTIONS:
-1. Detect the patient's language
-2. If NOT Spanish, translate to Spanish for the healthcare professional
-3. Classify according to SET levels I(Resuscitation) II(Emergency) III(Urgency) IV(Standard) V(Non-urgent)
-4. Identify positive severity discriminators
-5. If you need more info, generate 1-2 questions IN THE PATIENT'S LANGUAGE
+1. Detect the patient's language automatically
+2. ALWAYS translate the patient's words to Spanish for the healthcare professional
+3. Classify according to SET: I(Resuscitation) II(Emergency) III(Urgency) IV(Standard) V(Non-urgent)
+4. Identify severity discriminators
+5. If you need more info to classify accurately, generate 1-2 follow-up questions IN THE PATIENT'S DETECTED LANGUAGE
 6. Generate clinical summary in Spanish
-
+7. Follow-up questions should be natural, conversational, as if a nurse is asking
+${prevContext?`\nPREVIOUS CONVERSATION:\n${prevContext}\n`:""}
 Respond ONLY with valid JSON, no markdown, no backticks:
-{"idioma":"string","traduccion_es":"string","nivel_set":1-5,"categoria":"string","sintomas":["s1"],"discriminadores":["d1"],"dolor_eva":0-10,"resumen_clinico":"string in Spanish","preguntas":["question in patient language"],"destino":"urgencias|suap|centro_salud|farmacia","especialidad":"string"}
+{"idioma":"detected language name","codigo_idioma":"BCP47 code like es-ES, en-US, ar-SA, fr-FR etc","traduccion_es":"full Spanish translation of what patient said","nivel_set":1-5,"categoria":"SET symptomatic category in Spanish","sintomas":["symptom1 in Spanish","symptom2"],"discriminadores":["discriminator1 in Spanish"],"dolor_eva":0-10,"resumen_clinico":"clinical summary in Spanish for the professional","preguntas":["follow-up question 1 IN PATIENT LANGUAGE","question 2 IN PATIENT LANGUAGE"],"destino":"urgencias|suap|centro_salud|farmacia","especialidad":"specialty in Spanish","triaje_completo":true or false}
 
 Patient says: "${text}"`;
 
-  const callGemini=async(text)=>{
+  const callGemini=async(text,prevContext)=>{
+    const prompt=TPROMPT(text,prevContext);
     if(gemK){
       try{
         const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${gemK}`,{
           method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({contents:[{parts:[{text:TPROMPT(text)}]}],generationConfig:{temperature:0.2,maxOutputTokens:1024,responseMimeType:"application/json"}})
+          body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:0.2,maxOutputTokens:1024,responseMimeType:"application/json"}})
         });
         const d=await r.json();const raw=d?.candidates?.[0]?.content?.parts?.[0]?.text||"";
         const parsed=JSON.parse(raw.replace(/```json|```/g,"").trim());
@@ -666,7 +778,7 @@ Patient says: "${text}"`;
     }
     try{
       const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,messages:[{role:"user",content:TPROMPT(text)}]})});
+        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,messages:[{role:"user",content:prompt}]})});
       const d=await r.json();const txt=d.content?.map(b=>b.text||"").join("")||"";
       return handleAI(JSON.parse(txt.replace(/```json|```/g,"").trim()));
     }catch(e){console.warn("Anthropic fail:",e);}
@@ -675,22 +787,119 @@ Patient says: "${text}"`;
 
   const localFallback=(text)=>{
     const lo=text.toLowerCase();let lv=4;
-    if(["no responde","inconsciente","no respira","convulsion"].some(a=>lo.includes(a)))lv=1;
-    else if(["pecho","infarto","sangre mucha","desmayo","subito","no puedo respirar"].some(a=>lo.includes(a)))lv=2;
-    else if(lo.match(/fiebre alta|39|vomit|no para/))lv=3;
-    else if(lo.match(/dolor|fiebre|tos|molest/))lv=4;else lv=5;
-    return{idioma:"es",traduccion_es:text,nivel_set:lv,categoria:"General",sintomas:[text.slice(0,60)],discriminadores:[],dolor_eva:lv<=2?8:3,resumen_clinico:text.slice(0,150),preguntas:lv>2?["Tiene fiebre?","Desde cuando tiene estos sintomas?"]:[],destino:lv<=2?"urgencias":"centro_salud",especialidad:"Medicina de Familia"};
+    if(["no responde","inconsciente","no respira","convulsion","unconscious","not breathing"].some(a=>lo.includes(a)))lv=1;
+    else if(["pecho","infarto","sangre mucha","desmayo","chest pain","heart attack","cannot breathe"].some(a=>lo.includes(a)))lv=2;
+    else if(lo.match(/fiebre alta|39|vomit|no para|high fever/))lv=3;
+    else if(lo.match(/dolor|fiebre|tos|molest|pain|fever|cough/))lv=4;else lv=5;
+    return{idioma:"auto",codigo_idioma:vLang,traduccion_es:text,nivel_set:lv,categoria:"General",sintomas:[text.slice(0,60)],discriminadores:[],dolor_eva:lv<=2?8:3,resumen_clinico:text.slice(0,150),preguntas:lv>2?["Tiene fiebre?","Desde cuando tiene estos sintomas?"]:[],destino:lv<=2?"urgencias":"centro_salud",especialidad:"Medicina de Familia",triaje_completo:lv<=2};
   };
 
-  const handleAI=(p)=>{setVA(p);if(p.preguntas?.length>0){setVFu(p.preguntas.slice(0,3));setVP("followup");}else finishVoice(p,[]);};
+  const handleAI=(p)=>{
+    setVA(p);
+    // Add translation to conversation log
+    if(p.traduccion_es){
+      setConvLog(prev=>{
+        const updated=[...prev];
+        if(updated.length>0&&!updated[updated.length-1].translation){
+          updated[updated.length-1].translation=p.traduccion_es;
+        }
+        return updated;
+      });
+    }
+    // If triage is complete or no follow-up questions, finish
+    if(p.triaje_completo||!p.preguntas||p.preguntas.length===0){
+      finishVoice(p,[]);
+    }else{
+      setVFu(p.preguntas.slice(0,2));
+      setVFi(0);setVFa([]);
+      setVP("followup");
+      // Read first question aloud
+      const qLang=p.codigo_idioma||vLang;
+      setTimeout(()=>startFollowupVoice(p.preguntas[0],qLang,0),500);
+    }
+  };
+
+  // Conversational follow-up: speak question, listen for answer, process
+  const startFollowupVoice=async(question,qLang,idx)=>{
+    // Add question to conversation
+    setConvLog(prev=>[...prev,{role:"system",text:question,lang:qLang}]);
+    setIsSpeaking(true);
+
+    // Speak the question aloud
+    await speakText(question,qLang);
+
+    // Now listen for the patient's answer
+    setVP("listening");
+    setItm("");
+    const answer=await listenOnce();
+
+    if(answer){
+      // Add answer to log
+      setConvLog(prev=>[...prev,{role:"patient",text:answer,lang:vLang}]);
+      const newAnswers=[...vFa,answer];
+      setVFa(newAnswers);
+
+      // If more questions, process answer and ask next
+      if(idx+1<vFu.length){
+        setVFi(idx+1);
+        // Brief pause then ask next question
+        setVP("processing");
+        await new Promise(r=>setTimeout(r,800));
+        setVP("followup");
+        startFollowupVoice(vFu[idx+1],qLang,idx+1);
+      }else{
+        // All questions answered — send everything back to Gemini for final classification
+        setVP("processing");
+        const fullContext=convLog.map(c=>`${c.role==="patient"?"Patient":"System"}: ${c.text}`).join("\n")+`\nPatient: ${answer}`;
+        await callGeminiFinal(fullContext,newAnswers);
+      }
+    }else{
+      // No answer — finish with what we have
+      const newAnswers=[...vFa,t.noAnswer];
+      setVFa(newAnswers);
+      if(idx+1<vFu.length){
+        setVFi(idx+1);setVP("followup");
+        startFollowupVoice(vFu[idx+1],qLang,idx+1);
+      }else{
+        finishVoice(vA,newAnswers);
+      }
+    }
+  };
+
+  // Final Gemini call with full conversation context
+  const callGeminiFinal=async(context,allAnswers)=>{
+    const prompt=`You are completing a medical triage. Based on the full conversation below, provide the FINAL classification.
+    
+${context}
+
+Respond ONLY with valid JSON:
+{"idioma":"string","codigo_idioma":"string","traduccion_es":"full Spanish translation of all patient responses","nivel_set":1-5,"categoria":"string","sintomas":["s1"],"discriminadores":["d1"],"dolor_eva":0-10,"resumen_clinico":"complete clinical summary in Spanish","preguntas":[],"destino":"urgencias|suap|centro_salud|farmacia","especialidad":"string","triaje_completo":true}`;
+
+    if(gemK){
+      try{
+        const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${gemK}`,{
+          method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:0.2,maxOutputTokens:1024,responseMimeType:"application/json"}})
+        });
+        const d=await r.json();const raw=d?.candidates?.[0]?.content?.parts?.[0]?.text||"";
+        const parsed=JSON.parse(raw.replace(/```json|```/g,"").trim());
+        setVA(parsed);finishVoice(parsed,allAnswers);return;
+      }catch(e){}
+    }
+    // Fallback: use initial analysis
+    finishVoice(vA,allAnswers);
+  };
 
   const finishVoice=(a,fua)=>{
+    window.speechSynthesis?.cancel();
     const allAns=[
       {q:t.patientNarrative,a:tx.trim()},
-      ...(a.idioma&&a.idioma!=="es"&&a.idioma!=="espanol"?[{q:t.langDetected+": "+a.idioma,a:a.traduccion_es}]:[]),
+      ...(a.traduccion_es&&a.idioma&&a.idioma!=="es"&&a.idioma!=="espanol"&&a.idioma!=="auto"?[{q:t.translationLabel+" ("+a.idioma+")",a:a.traduccion_es}]:[]),
       {q:t.detectedSymptomsLabel,a:(a.sintomas||[]).join(", ")},
       {q:t.clinicalSummary,a:a.resumen_clinico||""},
       ...fua.map((a2,i)=>({q:vFu[i]||`${t.followupQ} ${i+1}`,a:a2})),
+      ...(a.discriminadores&&a.discriminadores.length>0?[{q:"Discriminadores SET",a:a.discriminadores.join(", ")}]:[]),
+      ...(a.especialidad?[{q:"Especialidad",a:a.especialidad}]:[]),
     ];
     setCat(null);setAns(allAns);finish(a.nivel_set||4,allAns);
   };
@@ -870,12 +1079,26 @@ Patient says: "${text}"`;
     const hasSR=!!(window.SpeechRecognition||window.webkitSpeechRecognition);
     const ps=1+Math.sin(pulse*0.12)*0.12;
 
+    // Conversation log component
+    const ConvLog=()=>convLog.length>0?<div style={{background:"#fff",borderRadius:12,padding:12,border:"1px solid #e2e8f0",marginBottom:14,maxHeight:200,overflowY:"auto"}}>
+      {convLog.map((c,i)=><div key={i} style={{marginBottom:8,display:"flex",flexDirection:"column",alignItems:c.role==="patient"?"flex-end":"flex-start"}}>
+        <div style={{maxWidth:"85%",padding:"8px 12px",borderRadius:c.role==="patient"?"12px 12px 2px 12px":"12px 12px 12px 2px",background:c.role==="patient"?"#eff6ff":"#f5f3ff",border:`1px solid ${c.role==="patient"?"#bfdbfe":"#e9d5ff"}`}}>
+          <div style={{fontSize:9,color:c.role==="patient"?"#0369a1":"#7c3aed",fontWeight:700,marginBottom:2,textTransform:"uppercase"}}>{c.role==="patient"?t.originalLabel:t.speakingQuestion}</div>
+          <div style={{fontSize:13,color:"#1e293b",lineHeight:1.4}}>{c.text}</div>
+          {c.translation&&<div style={{marginTop:4,paddingTop:4,borderTop:"1px solid #e2e8f0"}}>
+            <div style={{fontSize:9,color:"#64748b",fontWeight:600}}>{t.translationLabel} (ES)</div>
+            <div style={{fontSize:12,color:"#475569",fontStyle:"italic"}}>{c.translation}</div>
+          </div>}
+        </div>
+      </div>)}
+    </div>:null;
+
     if(vP==="idle")return <div style={{padding:"20px 16px",maxWidth:480,margin:"0 auto"}}>
       <div style={{textAlign:"center",padding:"20px 0 14px"}}>
         <div style={{width:80,height:80,borderRadius:20,background:"linear-gradient(135deg,#7c3aed,#6d28d9)",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 14px",boxShadow:"0 6px 20px rgba(124,58,237,0.25)"}}>
           <span style={{fontSize:20,color:"#fff",fontWeight:800,fontFamily:F}}>VOZ</span>
         </div>
-        <h2 style={{fontSize:20,fontFamily:F,color:"#1e293b",margin:"0 0 6px"}}>{t.voiceTitle}</h2>
+        <h2 style={{fontSize:20,fontFamily:F,color:"#1e293b",margin:"0 0 6px"}}>{t.voiceConversation}</h2>
         <p style={{color:"#64748b",fontSize:13,margin:"0 0 14px",lineHeight:1.5,textAlign:"center"}}>{t.voiceSub}</p>
       </div>
       <div style={{marginBottom:14}}>
@@ -896,7 +1119,10 @@ Patient says: "${text}"`;
         {!showKey&&!gemK&&<div style={{fontSize:10,color:"#ca8a04"}}>{t.geminiNoKey}</div>}
         {!showKey&&gemK&&<div style={{fontSize:10,color:"#16a34a"}}>{t.geminiReady}</div>}
       </div>
-      <div style={{background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:10,padding:12,marginBottom:14,fontSize:12,color:"#166534",lineHeight:1.5,fontStyle:"italic"}}>{t.voiceExample}</div>
+      <div style={{background:"#f0fdf4",border:"1px solid #bbf7d0",borderRadius:10,padding:12,marginBottom:14,fontSize:12,color:"#166534",lineHeight:1.5}}>
+        <div style={{fontWeight:600,marginBottom:4}}>{t.voiceFollowupIntro}</div>
+        <div style={{fontStyle:"italic"}}>{t.voiceExample}</div>
+      </div>
       {!hasSR&&<div style={{background:"#fef2f2",borderRadius:8,padding:10,marginBottom:12,fontSize:11,color:"#dc2626"}}>{t.browserNoVoice}</div>}
       <button onClick={startRec} disabled={!hasSR} style={{...btnS(hasSR?"linear-gradient(135deg,#7c3aed,#6d28d9)":"#e2e8f0",hasSR?"#fff":"#94a3b8"),fontSize:17}}>{t.startSpeaking}</button>
       <div style={{fontSize:10,color:"#94a3b8",marginTop:6,textAlign:"center"}}>{gemK?t.poweredBy:t.localMode}</div>
@@ -929,43 +1155,71 @@ Patient says: "${text}"`;
       </button>
     </div>;
 
-    if(vP==="analyzing")return <div style={{padding:"50px 16px",maxWidth:480,margin:"0 auto",textAlign:"center"}}>
+    if(vP==="analyzing"||vP==="processing")return <div style={{padding:"40px 16px",maxWidth:480,margin:"0 auto",textAlign:"center"}}>
+      <ConvLog/>
       <div style={{width:60,height:60,borderRadius:16,background:gemK?"linear-gradient(135deg,#4285f4,#ea4335,#fbbc04,#34a853)":"linear-gradient(135deg,#7c3aed,#0077B6)",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 14px",animation:"sp 1.5s linear infinite"}}>
         <span style={{color:"#fff",fontWeight:800,fontSize:13,fontFamily:F}}>AI</span>
       </div>
       <style>{`@keyframes sp{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}`}</style>
-      <h3 style={{fontFamily:F,color:"#1e293b",margin:"0 0 4px",fontSize:17}}>{gemK?t.analyzing:t.analyzingLocal}</h3>
+      <h3 style={{fontFamily:F,color:"#1e293b",margin:"0 0 4px",fontSize:17}}>{vP==="processing"?t.processingAnswer:gemK?t.analyzing:t.analyzingLocal}</h3>
       <p style={{color:"#64748b",fontSize:12}}>{gemK?t.analyzingSub:t.analyzingLocalSub}</p>
-      <div style={{background:"#f8fafc",borderRadius:8,padding:12,marginTop:18,fontSize:12,color:"#475569",fontStyle:"italic",textAlign:"left",lineHeight:1.5}}>
-        "{tx.trim().slice(0,180)}{tx.length>180?"...":""}"
-      </div>
     </div>;
 
-    if(vP==="followup"&&vFu.length>0){
-      const fq=vFu[vFi];
-      return <div style={{padding:"20px 16px",maxWidth:480,margin:"0 auto"}}>
-        {vA&&<div style={{background:"#faf5ff",borderRadius:10,padding:10,marginBottom:12}}>
-          {vA.idioma&&vA.idioma!=="es"&&vA.idioma!=="espanol"&&<div style={{fontSize:11,color:"#7c3aed",marginBottom:3}}>{t.langDetected}: {vA.idioma}</div>}
-          <div style={{fontSize:11,color:"#6b21a8"}}>{t.detectedSymptoms}: {(vA.sintomas||[]).join(", ")}</div>
-        </div>}
-        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
-          <div style={{flex:1,height:4,background:"#e2e8f0",borderRadius:2}}>
-            <div style={{width:`${((vFi+1)/vFu.length)*100}%`,height:"100%",background:"#7c3aed",borderRadius:2}}/>
+    // Followup + Listening — conversational flow
+    if(vP==="followup"||vP==="listening")return <div style={{padding:"20px 16px",maxWidth:480,margin:"0 auto"}}>
+      {/* Analysis summary */}
+      {vA&&<div style={{background:"#faf5ff",borderRadius:10,padding:10,marginBottom:12}}>
+        {vA.idioma&&vA.idioma!=="es"&&vA.idioma!=="espanol"&&vA.idioma!=="auto"&&<div style={{fontSize:11,color:"#7c3aed",marginBottom:3}}>{t.langDetected}: {vA.idioma}</div>}
+        <div style={{fontSize:11,color:"#6b21a8"}}>{t.detectedSymptoms}: {(vA.sintomas||[]).join(", ")}</div>
+      </div>}
+      {/* Conversation log */}
+      <ConvLog/>
+      {/* Current state indicator */}
+      <div style={{textAlign:"center",padding:"12px 0"}}>
+        {isSpeaking&&<div>
+          <div style={{width:50,height:50,borderRadius:"50%",background:"linear-gradient(135deg,#7c3aed,#a78bfa)",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 8px",animation:"sp 2s linear infinite"}}>
+            <span style={{color:"#fff",fontWeight:800,fontSize:11,fontFamily:F}}>TTS</span>
           </div>
-          <span style={{fontSize:10,color:"#64748b"}}>{t.followupQ} {vFi+1}/{vFu.length}</span>
+          <p style={{fontSize:13,color:"#7c3aed",fontWeight:600}}>{t.speakingQuestion}</p>
+        </div>}
+        {vP==="listening"&&!isSpeaking&&<div>
+          <div style={{width:60,height:60,borderRadius:"50%",background:"linear-gradient(135deg,#dc2626,#ef4444)",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 8px",boxShadow:"0 0 20px rgba(220,38,38,0.3)"}}>
+            <span style={{color:"#fff",fontWeight:800,fontSize:11,fontFamily:F}}>REC</span>
+          </div>
+          <p style={{fontSize:13,color:"#dc2626",fontWeight:600}}>{t.listeningAnswer}</p>
+          {itm&&<p style={{fontSize:12,color:"#64748b",fontStyle:"italic",margin:"4px 0 0"}}>{itm}</p>}
+        </div>}
+        {vP==="followup"&&!isSpeaking&&<div>
+          <div style={{display:"flex",alignItems:"center",gap:6,justifyContent:"center"}}>
+            <div style={{flex:1,height:4,background:"#e2e8f0",borderRadius:2,maxWidth:200}}>
+              <div style={{width:`${((vFi+1)/vFu.length)*100}%`,height:"100%",background:"#7c3aed",borderRadius:2}}/>
+            </div>
+            <span style={{fontSize:10,color:"#64748b"}}>{t.round} {vFi+1}/{vFu.length}</span>
+          </div>
+        </div>}
+      </div>
+      {/* Manual text fallback for follow-ups */}
+      {vP==="followup"&&!isSpeaking&&vFu[vFi]&&<div style={{marginTop:8}}>
+        <p style={{fontSize:13,fontWeight:600,color:"#1e293b",marginBottom:8}}>{vFu[vFi]}</p>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={()=>{setVP("listening");listenOnce().then(ans=>{
+            const answer=ans||t.noAnswer;
+            setConvLog(prev=>[...prev,{role:"patient",text:answer,lang:vLang}]);
+            const na=[...vFa,answer];setVFa(na);
+            if(vFi+1<vFu.length){setVFi(vFi+1);setVP("followup");setTimeout(()=>startFollowupVoice(vFu[vFi+1],vA?.codigo_idioma||vLang,vFi+1),500);}
+            else{setVP("processing");callGeminiFinal(convLog.map(c=>`${c.role==="patient"?"Patient":"System"}: ${c.text}`).join("\n")+"\nPatient: "+answer,na);}
+          });}} style={{...btnS("linear-gradient(135deg,#7c3aed,#6d28d9)"),flex:1,fontSize:14}}>{t.answerByVoice}</button>
+          <button onClick={()=>{
+            const val=prompt(vFu[vFi])||t.noAnswer;
+            setConvLog(prev=>[...prev,{role:"patient",text:val,lang:vLang}]);
+            const na=[...vFa,val];setVFa(na);
+            if(vFi+1<vFu.length){setVFi(vFi+1);setVP("followup");setTimeout(()=>startFollowupVoice(vFu[vFi+1],vA?.codigo_idioma||vLang,vFi+1),500);}
+            else finishVoice(vA,na);
+          }} style={{...btnS("#e2e8f0","#475569"),flex:1,fontSize:14}}>{t.answerByText}</button>
         </div>
-        <h3 style={{margin:"0 0 12px",fontSize:15,fontFamily:F,color:"#0c4a6e"}}>{fq}</h3>
-        <textarea placeholder={t.writeAnswer} rows={3} id={`vf-${vFi}`}
-          style={{width:"100%",padding:"10px",border:"1.5px solid #e2e8f0",borderRadius:10,fontSize:13,fontFamily:F,resize:"none",outline:"none",boxSizing:"border-box",marginBottom:8}}/>
-        <button onClick={()=>{
-          const el=document.getElementById(`vf-${vFi}`);const val=el?.value?.trim()||t.noAnswer;
-          const na=[...vFa,val];setVFa(na);
-          if(vFi+1<vFu.length)setVFi(vFi+1);else finishVoice(vA,na);
-        }} style={btnS("linear-gradient(135deg,#7c3aed,#6d28d9)")}>
-          {vFi+1<vFu.length?t.nextQuestion:t.seeResult}
-        </button>
-      </div>;
-    }
+      </div>}
+    </div>;
+
     return null;
   };
 
