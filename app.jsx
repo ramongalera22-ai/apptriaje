@@ -725,23 +725,8 @@ function App() {
   };
 
   // ─── CONVERSATIONAL VOICE TRIAGE WITH GEMINI ───
-  const [gemK,setGemK]=useState(()=>{try{return localStorage.getItem("gk")||"";}catch(e){return"";}});
-  const [showKey,setShowKey]=useState(false);
-  const [vLang,setVLang]=useState("es-ES");
-  const [vP,setVP]=useState("idle"); // idle,recording,analyzing,followup,listening,processing
-  const [tx,setTx]=useState("");
-  const [itm,setItm]=useState("");
-  const [vA,setVA]=useState(null);
-  const [vFu,setVFu]=useState([]);
-  const [vFi,setVFi]=useState(0);
-  const [vFa,setVFa]=useState([]);
-  const [pulse,setPulse]=useState(0);
-  const [convLog,setConvLog]=useState([]); // conversation log [{role,text,translation}]
+  const [convLog,setConvLog]=useState([]);
   const [isSpeaking,setIsSpeaking]=useState(false);
-  const recRef=useRef(null);
-  const animRef=useRef(null);
-
-  const saveK=(k)=>{setGemK(k);try{localStorage.setItem("gk",k);}catch(e){}};
 
   // Speech synthesis — reads question aloud in patient's language
   const speakText=(text,langCode)=>{
